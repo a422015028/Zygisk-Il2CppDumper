@@ -1,7 +1,6 @@
 #include <cstring>
-#include <string>      // 新增：处理字符串
-#include <fstream>     // 新增：读取文件
-#include <algorithm>   // 新增：处理不可见字符
+#include <string>
+#include <algorithm>
 #include <thread>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -11,34 +10,11 @@
 #include <cinttypes>
 #include "hack.h"
 #include "zygisk.hpp"
-// #include "game.h"   // 删除了这个头文件，因为我们不再需要写死包名了
 #include "log.h"
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
 using zygisk::ServerSpecializeArgs;
-
-// ==============================================================
-// 新增的辅助函数：从 /data/local/tmp/gamepackage.txt 读取目标包名
-// ==============================================================
-std::string GetTargetPackageName() {
-    std::string packageName = "";
-    // 以只读模式打开文件
-    std::ifstream file("/data/local/tmp/gamepackage.txt");
-    
-    if (file.is_open()) {
-        std::getline(file, packageName);
-        
-        // 过滤掉文件中可能存在的换行符(\r, \n)和空格，防止影响包名匹对
-        packageName.erase(std::remove(packageName.begin(), packageName.end(), '\r'), packageName.end());
-        packageName.erase(std::remove(packageName.begin(), packageName.end(), '\n'), packageName.end());
-        packageName.erase(std::remove(packageName.begin(), packageName.end(), ' '), packageName.end());
-        
-        file.close();
-    }
-    return packageName;
-}
-// ==============================================================
 
 class MyModule : public zygisk::ModuleBase {
 public:
@@ -65,20 +41,42 @@ public:
 private:
     Api *api;
     JNIEnv *env;
-    bool enable_hack;
+    bool enable_hack = false;
     char *game_data_dir;
     void *data;
     size_t length;
 
+    // 终极读取函数：从 Magisk 模块自身目录中读取包名
+    std::string ReadConfigFromModuleDir() {
+        int dirfd = api->getModuleDir();  // 获取 Magisk 赋予的高权限模块目录描述符
+        if (dirfd < 0) return "";
+
+        // 在模块目录下寻找 gamepackage.txt
+        int fd = openat(dirfd, "gamepackage.txt", O_RDONLY);
+        if (fd < 0) {
+            return "";
+        }
+
+        char buffer[128] = {0};
+        int bytes_read = read(fd, buffer, sizeof(buffer) - 1);
+        close(fd);
+
+        if (bytes_read > 0) {
+            std::string pkg(buffer);
+            // 强力过滤：清理可能混入的所有空格、回车、换行符
+            pkg.erase(std::remove_if(pkg.begin(), pkg.end(), [](unsigned char c) { return std::isspace(c); }), pkg.end());
+            return pkg;
+        }
+        return "";
+    }
+
     void preSpecialize(const char *package_name, const char *app_data_dir) {
-        // ==============================================================
-        // 修改的核心部分：调用上面的函数获取你写的包名，并和当前启动的 app 对比
-        // ==============================================================
-        std::string targetPkg = GetTargetPackageName();
-        
-        // 如果文件读取成功（不为空），并且当前的包名和文件里的一致
+        // 调用我们的新函数
+        std::string targetPkg = ReadConfigFromModuleDir();
+
+        // 匹配成功！
         if (!targetPkg.empty() && targetPkg == package_name) {
-            LOGI("detect game: %s (Read from /data/local/tmp/gamepackage.txt)", package_name);
+            LOGI("detect game (from config): %s", package_name);
             enable_hack = true;
             game_data_dir = new char[strlen(app_data_dir) + 1];
             strcpy(game_data_dir, app_data_dir);
@@ -103,7 +101,6 @@ private:
             }
 #endif
         } else {
-            // 如果不是目标游戏，则卸载模块不生效
             api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
         }
     }
